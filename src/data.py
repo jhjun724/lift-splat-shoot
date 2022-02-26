@@ -14,8 +14,10 @@ from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
 from nuscenes.utils.data_classes import Box
 from glob import glob
+from functools import partial
 
-from .tools import get_lidar_data, img_transform, normalize_img, gen_dx_bx
+from .tools import (get_lidar_data, img_transform, normalize_img, gen_dx_bx,
+                    get_nusc_maps, bin_nusc_map)
 
 
 class NuscData(torch.utils.data.Dataset):
@@ -25,11 +27,19 @@ class NuscData(torch.utils.data.Dataset):
         self.data_aug_conf = data_aug_conf
         self.grid_conf = grid_conf
 
+        self.map_folder = '/home/user/data/Dataset/nuscenes'
+        self.nusc_maps = get_nusc_maps(self.map_folder)
+
         self.scenes = self.get_scenes()
         self.ixes = self.prepro()
 
         dx, bx, nx = gen_dx_bx(grid_conf['xbound'], grid_conf['ybound'], grid_conf['zbound'])
         self.dx, self.bx, self.nx = dx.numpy(), bx.numpy(), nx.numpy()
+
+        self.scene2map = {}
+        for rec in nusc.scene:
+            log = nusc.get('log', rec['log_token'])
+            self.scene2map[rec['name']] = log['location']
 
         self.fix_nuscenes_formatting()
 
@@ -173,7 +183,10 @@ class NuscData(torch.utils.data.Dataset):
                                 self.nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])
         trans = -np.array(egopose['translation'])
         rot = Quaternion(egopose['rotation']).inverse
-        img = np.zeros((self.nx[0], self.nx[1]))
+        
+        static_img = bin_nusc_map(rec, self.nusc_maps, self.nusc, self.scene2map, self.dx[:2], self.bx[:2], self.nx)
+        vehicle_img = np.zeros((self.nx[0], self.nx[1]))
+
         for tok in rec['anns']:
             inst = self.nusc.get('sample_annotation', tok)
             # add category for lyft
@@ -188,9 +201,18 @@ class NuscData(torch.utils.data.Dataset):
                 (pts - self.bx[:2] + self.dx[:2]/2.) / self.dx[:2]
                 ).astype(np.int32)
             pts[:, [1, 0]] = pts[:, [0, 1]]
-            cv2.fillPoly(img, [pts], 1.0)
+            cv2.fillPoly(vehicle_img, [pts], 1.0)
 
-        return torch.Tensor(img).unsqueeze(0)
+        static_img[0][vehicle_img == 1.0] = 0.0
+        static_img[1][vehicle_img == 1.0] = 0.0
+        static_img[2][vehicle_img == 1.0] = 0.0
+
+        vehicle_img = torch.Tensor(vehicle_img).unsqueeze(0)
+        static_img = torch.Tensor(static_img)
+        binimg = torch.cat((vehicle_img, static_img))
+
+        # return torch.Tensor(vehicle_img).unsqueeze(0)
+        return binimg
 
     def choose_cams(self):
         if self.is_train and self.data_aug_conf['Ncams'] < len(self.data_aug_conf['cams']):
@@ -201,8 +223,8 @@ class NuscData(torch.utils.data.Dataset):
         return cams
 
     def __str__(self):
-        return f"""NuscData: {len(self)} samples. Split: {"train" if self.is_train else "val"}.
-                   Augmentation Conf: {self.data_aug_conf}"""
+        return f"""NuscData: {len(self)} samples. Split: {"train" if self.is_train else "val"}."""
+                #    Augmentation Conf: {self.data_aug_conf}"""
 
     def __len__(self):
         return len(self.ixes)
@@ -241,10 +263,9 @@ def worker_rnd_init(x):
     np.random.seed(13 + x)
 
 
-def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
-                 nworkers, parser_name):
-    nusc = NuScenes(version='v1.0-{}'.format(version),
-                    dataroot=os.path.join(dataroot, version),
+def compile_data(args, data_aug_conf, grid_conf, parser_name):
+    nusc = NuScenes(version='v1.0-{}'.format(args.version),
+                    dataroot=os.path.join(args.dataroot, 'v1.0-{}'.format(args.version)),
                     verbose=False)
     parser = {
         'vizdata': VizData,
@@ -255,13 +276,27 @@ def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz,
     valdata = parser(nusc, is_train=False, data_aug_conf=data_aug_conf,
                        grid_conf=grid_conf)
 
-    trainloader = torch.utils.data.DataLoader(traindata, batch_size=bsz,
-                                              shuffle=True,
-                                              num_workers=nworkers,
-                                              drop_last=True,
-                                              worker_init_fn=worker_rnd_init)
-    valloader = torch.utils.data.DataLoader(valdata, batch_size=bsz,
-                                            shuffle=False,
-                                            num_workers=nworkers)
+    if args.distributed:
+        assert torch.distributed.is_available(), "Distribution should be initialized!"
+        trainsampler = torch.utils.data.DistributedSampler(traindata, args.ngpus, args.local_rank, shuffle=args.shuffle)
+        valsampler = torch.utils.data.DistributedSampler(valdata, args.ngpus, args.local_rank, shuffle=False)
+        trainbatchsampler = torch.utils.data.BatchSampler(trainsampler, args.batch_size, drop_last=True)
+        valbatchsampler = torch.utils.data.BatchSampler(valsampler, args.batch_size, drop_last=False)
+    else:
+        trainsampler = None
+        valsampler = None
+
+    trainloader = torch.utils.data.DataLoader(traindata,
+                                            batch_size=args.batch_size,
+                                            sampler=trainsampler,
+                                            # batch_sampler=trainbatchsampler,
+                                            num_workers=args.nworkers,
+                                            drop_last=True,)
+    valloader = torch.utils.data.DataLoader(valdata,
+                                            batch_size=args.batch_size,
+                                            sampler=valsampler,
+                                            # batch_sampler=valbatchsampler,
+                                            num_workers=args.nworkers,
+                                            drop_last=False,)
 
     return trainloader, valloader

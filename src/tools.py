@@ -11,6 +11,7 @@ import torchvision
 from tqdm import tqdm
 from pyquaternion import Quaternion
 from PIL import Image
+import cv2
 from functools import reduce
 import matplotlib as mpl
 mpl.use('Agg')
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 from nuscenes.utils.data_classes import LidarPointCloud
 from nuscenes.utils.geometry_utils import transform_matrix
 from nuscenes.map_expansion.map_api import NuScenesMap
+from nuscenes.utils.data_classes import Box
 
 
 def get_lidar_data(nusc, sample_rec, nsweeps, min_distance):
@@ -281,7 +283,7 @@ def add_ego(bx, dx):
     ])
     pts = (pts - bx) / dx
     pts[:, [0,1]] = pts[:, [1,0]]
-    plt.fill(pts[:, 0], pts[:, 1], '#76b900')
+    plt.fill(pts[:, 0], pts[:, 1], c=(0.0, 0.0, 0.0))
 
 
 def get_nusc_maps(map_folder):
@@ -317,6 +319,77 @@ def plot_nusc_map(rec, nusc_maps, nusc, scene2map, dx, bx):
     for la in lmap['lane_divider']:
         pts = (la - bx) / dx
         plt.plot(pts[:, 1], pts[:, 0], c=(159./255., 0.0, 1.0), alpha=0.5)
+
+
+def plot_nusc_veh(rec, nusc, dx, bx):
+    egopose = nusc.get('ego_pose', nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])
+
+    trans = -np.array(egopose['translation'])
+    rot = Quaternion(egopose['rotation']).inverse
+
+    for tok in rec['anns']:
+        inst = nusc.get('sample_annotation', tok)
+        # add category for lyft
+        if not inst['category_name'].split('.')[0] == 'vehicle':
+            continue
+        box = Box(inst['translation'], inst['size'], Quaternion(inst['rotation']))
+        box.translate(trans)
+        box.rotate(rot)
+
+        pts = box.bottom_corners()[:2].T
+        pts = np.round(
+            (pts - bx + dx/2.) / dx
+            ).astype(np.int32)
+        plt.fill(pts[:,1], pts[:,0], c=(0.00, 0.00, 1.00), alpha = 1.0)
+
+
+
+def bin_nusc_map(rec, nusc_maps, nusc, scene2map, dx, bx, nx):
+    static_img = np.zeros((3, nx[0], nx[1]))
+    static_img[2] = np.ones((nx[0], nx[1]))
+
+    egopose = nusc.get('ego_pose', nusc.get('sample_data', rec['data']['LIDAR_TOP'])['ego_pose_token'])
+    map_name = scene2map[nusc.get('scene', rec['scene_token'])['name']]
+
+    rot = Quaternion(egopose['rotation']).rotation_matrix
+    rot = np.arctan2(rot[1, 0], rot[0, 0])
+    center = np.array([egopose['translation'][0], egopose['translation'][1], np.cos(rot), np.sin(rot)])
+
+    poly_names = ['road_segment', 'lane']
+    line_names = ['road_divider', 'lane_divider']
+    lmap = get_local_map(nusc_maps[map_name], center,
+                         50.0, poly_names, line_names)
+
+    drivable = np.zeros((nx[0]+200, nx[1]+200))
+    laneseg = np.zeros((nx[0]+200, nx[1]+200))
+
+    for name in poly_names:
+        for la in lmap[name]:
+            pts = np.round((la - bx) / dx).astype(np.int32)
+            pts[:, [1, 0]] = pts[:, [0, 1]]
+            # pts = pts[np.where((pts[:,0] < 200) & (pts[:,1] < 200) & (pts [:,0] >= 0) & (pts [:,1] >= 0))]
+            pts = pts + [100, 100]
+            cv2.fillPoly(drivable, [pts], 1.0)
+    for la in lmap['road_divider']:
+        pts = np.round((la - bx) / dx).astype(np.int32)
+        pts[:, [1,0]] = pts[:, [0,1]]
+        # pts = pts[np.where((pts[:,0] < 200) & (pts[:,1] < 200) & (pts [:,0] >= 0) & (pts [:,1] >= 0))]
+        pts = pts + [100, 100]
+        cv2.polylines(laneseg, [pts], False, 1.0, thickness=1)
+    for la in lmap['lane_divider']:
+        pts = np.round((la - bx) / dx).astype(np.int32)
+        pts[:, [1,0]] = pts[:, [0,1]]
+        # pts = pts[np.where((pts[:,0] < 200) & (pts[:,1] < 200) & (pts [:,0] >= 0) & (pts [:,1] >= 0))]
+        pts = pts + [100, 100]
+        cv2.polylines(laneseg, [pts], False, 1.0, thickness=1)
+    
+    static_img[0] = drivable[100:300,100:300].copy()
+    static_img[1] = laneseg[100:300,100:300].copy()
+
+    static_img[2][static_img[0] == 1.0] = 0.0
+    static_img[0][static_img[1] == 1.0] = 0.0
+
+    return static_img
 
 
 def get_local_map(nmap, center, stretch, layer_names, line_names):
@@ -363,7 +436,7 @@ def get_local_map(nmap, center, stretch, layer_names, line_names):
                 )
 
     # convert to local coordinates in place
-    rot = get_rot(np.arctan2(center[3], center[2])).T
+    rot = get_rot(np.arctan2(center[3], center[2])).t()
     for layer_name in polys:
         for rowi in range(len(polys[layer_name])):
             polys[layer_name][rowi] -= center[:2]

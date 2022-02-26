@@ -6,6 +6,7 @@ Authors: Jonah Philion and Sanja Fidler
 
 import torch
 from time import time
+import datetime
 from tensorboardX import SummaryWriter
 import numpy as np
 import os
@@ -13,72 +14,76 @@ import os
 from .models import compile_model
 from .data import compile_data
 from .tools import SimpleLoss, get_batch_iou, get_val_info
+from .lr_scheduler import WarmupPolyLR
 
 
-def train(version,
-            dataroot='/data/nuscenes',
-            nepochs=10000,
-            gpuid=1,
-
-            H=900, W=1600,
-            resize_lim=(0.193, 0.225),
-            final_dim=(128, 352),
-            bot_pct_lim=(0.0, 0.22),
-            rot_lim=(-5.4, 5.4),
-            rand_flip=True,
-            ncams=5,
-            max_grad_norm=5.0,
-            pos_weight=2.13,
-            logdir='./runs',
-
-            xbound=[-50.0, 50.0, 0.5],
-            ybound=[-50.0, 50.0, 0.5],
-            zbound=[-10.0, 10.0, 20.0],
-            dbound=[4.0, 45.0, 1.0],
-
-            bsz=4,
-            nworkers=10,
-            lr=1e-3,
-            weight_decay=1e-7,
-            ):
+def train(args):
     grid_conf = {
-        'xbound': xbound,
-        'ybound': ybound,
-        'zbound': zbound,
-        'dbound': dbound,
+        'xbound': args.xbound,
+        'ybound': args.ybound,
+        'zbound': args.zbound,
+        'dbound': args.dbound,
     }
     data_aug_conf = {
-                    'resize_lim': resize_lim,
-                    'final_dim': final_dim,
-                    'rot_lim': rot_lim,
-                    'H': H, 'W': W,
-                    'rand_flip': rand_flip,
-                    'bot_pct_lim': bot_pct_lim,
+                    'resize_lim': args.resize_lim,
+                    'final_dim': args.crop_size,
+                    'rot_lim': args.rot_lim,
+                    'H': args.base_size[0], 'W': args.base_size[1],
+                    'rand_flip': args.rand_flip,
+                    'bot_pct_lim': args.bot_pct_lim,
                     'cams': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
                              'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'],
-                    'Ncams': ncams,
+                    'Ncams': args.ncams,
                 }
-    trainloader, valloader = compile_data(version, dataroot, data_aug_conf=data_aug_conf,
-                                          grid_conf=grid_conf, bsz=bsz, nworkers=nworkers,
-                                          parser_name='segmentationdata')
 
-    device = torch.device('cpu') if gpuid < 0 else torch.device(f'cuda:{gpuid}')
+    if torch.cuda.is_available() | ~args.no_cuda:
+        torch.cuda.set_device(args.local_rank)
+        if args.distributed:
+            torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
 
-    model = compile_model(grid_conf, data_aug_conf, outC=1)
+    trainloader, valloader = compile_data(args,
+                                        data_aug_conf=data_aug_conf,
+                                        grid_conf=grid_conf,
+                                        parser_name='segmentationdata')
+    model = compile_model(grid_conf, data_aug_conf, outC=4)
     model.to(device)
-
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    loss_fn = SimpleLoss(pos_weight).cuda(gpuid)
-
-    writer = SummaryWriter(logdir=logdir)
-    val_step = 1000 if version == 'mini' else 10000
-
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=True
+        )
     model.train()
-    counter = 0
-    for epoch in range(nepochs):
+
+    iters_per_epoch = len(trainloader.dataset) // (args.batch_size * args.ngpus)
+    max_iters = args.nepochs * iters_per_epoch
+
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr*args.ngpus, weight_decay=args.weight_decay)
+    lr_scheduler = WarmupPolyLR(opt,
+                                max_iters=max_iters,
+                                power=0.9,
+                                warmup_factor=args.warmup_factor,
+                                warmup_iters=args.warmup_iters,
+                                warmup_method=args.warmup_method)
+    loss_fn = SimpleLoss(args.pos_weight).to(device)
+    writer = SummaryWriter(logdir=args.log_dir)
+    val_step = 1000 if args.version == 'mini' else 10000
+
+    iter = 0
+    val_info = {'loss':0, 'iou':0}
+    best_iou = 0.0
+    start_time = time()
+    print('Start training. Total epochs: {:d}, Total iterations: {:d}, Start time: {}'
+        .format(args.nepochs, max_iters, datetime.datetime.now().strftime("%H:%M:%S")))
+
+    for epoch in range(args.nepochs):
         np.random.seed()
         for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(trainloader):
+            iter = iter + 1
             t0 = time()
             opt.zero_grad()
             preds = model(imgs.to(device),
@@ -91,30 +96,40 @@ def train(version,
             binimgs = binimgs.to(device)
             loss = loss_fn(preds, binimgs)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             opt.step()
-            counter += 1
+            lr_scheduler.step()
             t1 = time()
+            if iter % 10 == 0:
+                print('Epochs: {:d}/{:d} || Iters: {:d}/{:d} || Lr: {:.6f} || Loss: {:.4f} || Elapsed Time: {} || Estimated Time: {}'.format(
+                    epoch, args.nepochs, iter, max_iters, opt.param_groups[0]['lr'], loss, 
+                    str(datetime.timedelta(seconds=int(t1 - start_time))),
+                    str(datetime.timedelta(seconds=int((t1 - start_time)/iter*(max_iters-iter))))
+                ))
+                writer.add_scalar('train/loss', loss, iter)
 
-            if counter % 10 == 0:
-                print(counter, loss.item())
-                writer.add_scalar('train/loss', loss, counter)
-
-            if counter % 50 == 0:
+            if iter % 50 == 0:
                 _, _, iou = get_batch_iou(preds, binimgs)
-                writer.add_scalar('train/iou', iou, counter)
-                writer.add_scalar('train/epoch', epoch, counter)
-                writer.add_scalar('train/step_time', t1 - t0, counter)
+                writer.add_scalar('train/iou', iou, iter)
+                writer.add_scalar('train/epoch', epoch, iter)
+                writer.add_scalar('train/step_time', t1 - t0, iter)
 
-            if counter % val_step == 0:
+            if iter % val_step == 0:
                 val_info = get_val_info(model, valloader, loss_fn, device)
                 print('VAL', val_info)
-                writer.add_scalar('val/loss', val_info['loss'], counter)
-                writer.add_scalar('val/iou', val_info['iou'], counter)
+                writer.add_scalar('val/loss', val_info['loss'], iter)
+                writer.add_scalar('val/iou', val_info['iou'], iter)
 
-            if counter % val_step == 0:
-                model.eval()
-                mname = os.path.join(logdir, "model{}.pt".format(counter))
-                print('saving', mname)
-                torch.save(model.state_dict(), mname)
-                model.train()
+        if epoch % 20 == 0 | epoch == args.nepochs:
+            model.eval()
+            if val_info['iou'] > best_iou:
+                best_iou = val_info['iou']
+                best_name = os.path.join(args.log_dir, "best_model_multi_gpu.pt")
+                print('saving', best_name)
+                torch.save(model.state_dict(), best_name)
+            mname = os.path.join(args.log_dir, "model_{}epoch_multi_gpu.pt".format(iter))
+            print('saving', mname)
+            torch.save(model.state_dict(), mname)
+            model.train()
+
+    print('End training. End time: {}'.format(datetime.datetime.now().strftime("%H:%M:%S")))
