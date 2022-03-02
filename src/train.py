@@ -120,14 +120,14 @@ def train(args):
                 writer.add_scalar('val/loss', val_info['loss'], iter)
                 writer.add_scalar('val/iou', val_info['iou'], iter)
 
-        if (epoch+1) % 20 == 0 | (epoch+1) == args.nepochs:
+        if (epoch+1) % 20 == 0 or (epoch+1) == args.nepochs:
             model.eval()
             if val_info['iou'] > best_iou:
                 best_iou = val_info['iou']
                 best_name = os.path.join(args.log_dir, "best_model_multi_gpu.pt")
                 print('saving', best_name)
                 torch.save(model.state_dict(), best_name)
-            mname = os.path.join(args.log_dir, "model_{}epochs_multi_gpu.pt".format(epoch))
+            mname = os.path.join(args.log_dir, "model_{}epochs_multi_gpu.pt".format(epoch+1))
             print('saving', mname)
             torch.save(model.state_dict(), mname)
             model.train()

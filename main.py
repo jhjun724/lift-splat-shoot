@@ -100,6 +100,7 @@ def print_args(args):
         print('=================')
         print('npochs:', args.nepochs)
         print('batch size per gpu:', args.batch_size)
+        print('number of gpus:', args.ngpus)
         print('total batch size:', args.batch_size * args.ngpus)
         print('=================')
     print('ngpus: {} || gpu_id: {} || rank: {}'.format(
