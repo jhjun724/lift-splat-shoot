@@ -74,7 +74,7 @@ def train(args):
     val_step = 1000 if args.version == 'mini' else 10000
 
     iter = 0
-    val_info = {'loss':0, 'iou':0}
+    val_info = {'loss':0.0, 'iou':0.0}
     best_iou = 0.0
     start_time = time()
     print('Start training. Total epochs: {:d}, Total iterations: {:d}, Start time: {}'
@@ -120,14 +120,14 @@ def train(args):
                 writer.add_scalar('val/loss', val_info['loss'], iter)
                 writer.add_scalar('val/iou', val_info['iou'], iter)
 
-        if epoch % 20 == 0 | epoch == args.nepochs:
+        if (epoch+1) % 20 == 0 | (epoch+1) == args.nepochs:
             model.eval()
             if val_info['iou'] > best_iou:
                 best_iou = val_info['iou']
                 best_name = os.path.join(args.log_dir, "best_model_multi_gpu.pt")
                 print('saving', best_name)
                 torch.save(model.state_dict(), best_name)
-            mname = os.path.join(args.log_dir, "model_{}epoch_multi_gpu.pt".format(iter))
+            mname = os.path.join(args.log_dir, "model_{}epochs_multi_gpu.pt".format(epoch))
             print('saving', mname)
             torch.save(model.state_dict(), mname)
             model.train()

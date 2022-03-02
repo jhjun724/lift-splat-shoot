@@ -46,7 +46,7 @@ def parse_args():
                         metavar='N', help='dataloader threads per gpu')
     parser.add_argument('--start_epoch', type=int, default=0,
                         metavar='N', help='start epochs (default:0)')
-    parser.add_argument('--nepochs', type=int, default=10, metavar='N',
+    parser.add_argument('--nepochs', type=int, default=500, metavar='N',
                         help='number of epochs to train (default: 1000)')
     parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
                         help='learning rate (default: 1e-4)')
@@ -92,11 +92,24 @@ def parse_args():
     
     return args
 
-if __name__ == '__main__':
-    args = parse_args()
+
+def print_args(args):
+    if args.local_rank==0:
+        print('=================')
+        print(args.dataset.upper(), args.version.upper())
+        print('=================')
+        print('npochs:', args.nepochs)
+        print('batch size per gpu:', args.batch_size)
+        print('total batch size:', args.batch_size * args.ngpus)
+        print('=================')
     print('ngpus: {} || gpu_id: {} || rank: {}'.format(
         args.ngpus, args.gpu_ids[args.local_rank], args.local_rank
     ))
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    print_args(args)
 
     src.train.train(args)
     # src.explore.viz_model_preds(args, viz_train=False, gpuid=3)
