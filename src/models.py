@@ -40,7 +40,12 @@ class CamEncode(nn.Module):
         self.D = D
         self.C = C
 
-        self.trunk = EfficientNet.from_pretrained("efficientnet-b0")
+        trunk = EfficientNet.from_pretrained("efficientnet-b0")
+        self.conv_stem = trunk._conv_stem
+        self.bn0 = trunk._bn0
+        self.swish = trunk._swish
+        self.blocks = trunk._blocks
+        self.global_params = trunk._global_params
 
         self.up1 = Up(320+112, 512)
         self.depthnet = nn.Conv2d(512, self.D + self.C, kernel_size=1, padding=0)
@@ -63,14 +68,14 @@ class CamEncode(nn.Module):
         endpoints = dict()
 
         # Stem
-        x = self.trunk._swish(self.trunk._bn0(self.trunk._conv_stem(x)))
+        x = self.swish(self.bn0(self.conv_stem(x)))
         prev_x = x
 
         # Blocks
-        for idx, block in enumerate(self.trunk._blocks):
-            drop_connect_rate = self.trunk._global_params.drop_connect_rate
+        for idx, block in enumerate(self.blocks):
+            drop_connect_rate = self.global_params.drop_connect_rate
             if drop_connect_rate:
-                drop_connect_rate *= float(idx) / len(self.trunk._blocks) # scale drop connect_rate
+                drop_connect_rate *= float(idx) / len(self.blocks) # scale drop connect_rate
             x = block(x, drop_connect_rate=drop_connect_rate)
             if prev_x.size(2) > x.size(2):
                 endpoints['reduction_{}'.format(len(endpoints)+1)] = prev_x

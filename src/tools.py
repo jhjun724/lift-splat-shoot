@@ -231,6 +231,16 @@ class SimpleLoss(torch.nn.Module):
         return loss
 
 
+class MultiLoss(torch.nn.Module):
+    def __init__(self):
+        super(MultiLoss, self).__init__()
+        self.loss_fn = torch.nn.MultiLabelSoftMarginLoss()
+
+    def forward(self, ypred, ytgt):
+        loss = self.loss_fn(ypred, ytgt)
+        return loss
+
+
 def get_batch_iou(preds, binimgs):
     """Assumes preds has NOT been sigmoided yet
     """

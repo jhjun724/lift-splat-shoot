@@ -27,7 +27,7 @@ class NuscData(torch.utils.data.Dataset):
         self.data_aug_conf = data_aug_conf
         self.grid_conf = grid_conf
 
-        self.map_folder = '/home/user/data/Dataset/nuscenes'
+        self.map_folder = '/home/ubuntu/VDC/Dataset/nuscenes'
         self.nusc_maps = get_nusc_maps(self.map_folder)
 
         self.scenes = self.get_scenes()
@@ -280,8 +280,8 @@ def compile_data(args, data_aug_conf, grid_conf, parser_name):
         assert torch.distributed.is_available(), "Distribution should be initialized!"
         trainsampler = torch.utils.data.DistributedSampler(traindata, args.ngpus, args.local_rank, shuffle=args.shuffle)
         valsampler = torch.utils.data.DistributedSampler(valdata, args.ngpus, args.local_rank, shuffle=False)
-        trainbatchsampler = torch.utils.data.BatchSampler(trainsampler, args.batch_size, drop_last=True)
-        valbatchsampler = torch.utils.data.BatchSampler(valsampler, args.batch_size, drop_last=False)
+        # trainbatchsampler = torch.utils.data.BatchSampler(trainsampler, args.batch_size, drop_last=True)
+        # valbatchsampler = torch.utils.data.BatchSampler(valsampler, args.batch_size, drop_last=False)
     else:
         trainsampler = None
         valsampler = None

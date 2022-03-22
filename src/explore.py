@@ -249,7 +249,7 @@ def eval_model_iou(version,
     print(val_info)
 
 
-def viz_model_preds(args, viz_train=False, gpuid=3):
+def viz_model_preds(args, viz_train=False, gpuid=0):
     grid_conf = {
         'xbound': args.xbound,
         'ybound': args.ybound,
@@ -260,7 +260,7 @@ def viz_model_preds(args, viz_train=False, gpuid=3):
             'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT']
     data_aug_conf = {
                     'resize_lim': args.resize_lim,
-                    'final_dim': args.crop_size,
+                    'final_dim': args.final_dim,
                     'rot_lim': args.rot_lim,
                     'H': args.base_size[0], 'W': args.base_size[1],
                     'rand_flip': args.rand_flip,
@@ -293,7 +293,7 @@ def viz_model_preds(args, viz_train=False, gpuid=3):
 
 
     val = 0.01
-    fH, fW = args.crop_size
+    fH, fW = args.final_dim
     fig = plt.figure(figsize=(3*fW*val, (1.5*fW + 2*fH)*val))
     gs = mpl.gridspec.GridSpec(3, 3, height_ratios=(1.5*fW, fH, fH))
     gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
@@ -365,7 +365,7 @@ def viz_vector_gt(args, viz_train=False):
             'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT']
     data_aug_conf = {
                     'resize_lim': args.resize_lim,
-                    'final_dim': args.crop_size,
+                    'final_dim': args.final_dim,
                     'rot_lim': args.rot_lim,
                     'H': args.base_size[0], 'W': args.base_size[1],
                     'rand_flip': args.rand_flip,
